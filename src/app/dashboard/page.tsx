@@ -64,6 +64,7 @@ interface ProfileData {
     metadata: any;
     contractAddress: string | null;
     transactionHash: string | null;
+    ownerAddress?: string | null;
     chainId: number | null;
     createdAt: string;
     type: string;
@@ -350,7 +351,7 @@ export default function DashboardPage() {
                       </div>
                       <div className="flex gap-2">
                         <Button variant="outline" size="sm" className="flex-1" onClick={() => setShareNft(n)}><Share2 className="h-3 w-3 mr-1" />Share</Button>
-                        {n.transactionHash && n.transactionHash.length > 2 && !/^0x0+$/.test(n.transactionHash) && <Button variant="outline" size="sm" asChild><a href={`https://amoy.polygonscan.com/tx/${n.transactionHash}`} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3 w-3" /></a></Button>}
+                        {n.transactionHash && n.transactionHash.length > 2 && !/^0x0+$/.test(n.transactionHash) && <Button variant="outline" size="sm" asChild><a href={`https://polygonscan.com/tx/${n.transactionHash}`} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3 w-3" /></a></Button>}
                       </div>
                     </CardContent>
                   </Card>

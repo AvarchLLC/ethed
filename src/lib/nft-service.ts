@@ -22,14 +22,14 @@ import {
   isOnChainEnabled,
 } from "@/lib/viem-client";
 import { encodeFunctionData } from "viem";
-import { polygonAmoy } from "viem/chains";
+import { polygon } from "viem/chains";
 import { logger } from "@/lib/monitoring";
 import fs from "fs";
 import path from "path";
 
 // Log on-chain mode at module load
 if (typeof globalThis !== 'undefined' && typeof process !== 'undefined') {
-  const mode = isOnChainEnabled() ? 'REAL (Polygon Amoy)' : 'MOCK (dev fallback)';
+  const mode = isOnChainEnabled() ? 'REAL (Polygon mainnet)' : 'MOCK (dev fallback)';
   logger.info(`NFT Service initialized — on-chain mode: ${mode}`, "nft-service");
 }
 
@@ -37,6 +37,7 @@ export interface NFTMetadata {
   name: string;
   description: string;
   image: string;
+  image_data?: string;
   courseSlug?: string;
   courseName?: string;
   attributes: Array<{
@@ -85,6 +86,10 @@ export async function uploadMetadataToIPFS(
 ): Promise<string> {
   // IPFS-first: prefer Pinata when configured. If missing, provide a dev fallback.
   if (!env.PINATA_JWT) {
+    if (isOnChainEnabled()) {
+      throw new Error('Pinata is required for on-chain minting. Configure PINATA_JWT so tokenURI is publicly accessible.');
+    }
+
     if (env.NODE_ENV === 'production') {
       throw new Error('Pinata not configured — PINATA_JWT is required in production');
     }
@@ -106,6 +111,10 @@ export async function uploadMetadataToIPFS(
     return await pinJSON(metadata as unknown as Record<string, unknown>);
   } catch {
     // If Pinata fails in dev, fallback to local file; in prod propagate error
+    if (isOnChainEnabled()) {
+      throw new Error('Failed to upload metadata to Pinata for on-chain minting.');
+    }
+
     if (env.NODE_ENV !== 'production') {
       try {
         const outDir = `${process.cwd()}/public/local-metadata`;
@@ -128,9 +137,10 @@ export async function uploadMetadataToIPFS(
  */
 export function generateGenesisScholarMetadata(
   imageUri: string,
-  ensName?: string
+  ensName?: string,
+  svgData?: string
 ): NFTMetadata {
-  return {
+  const metadata: NFTMetadata = {
     name: ensName ? `EIPsInsight Academy Pioneer - ${ensName}` : "EIPsInsight Academy Pioneer NFT",
     description: `Commemorates ${ensName || 'a dedicated scholar'} being an early EIPsInsight Academy pioneer and completing the onboarding journey.`,
     image: imageUri,
@@ -143,6 +153,12 @@ export function generateGenesisScholarMetadata(
     ],
     external_url: "https://academy.eipsinsight.com",
   };
+
+  if (svgData) {
+    metadata.image_data = svgData;
+  }
+  
+  return metadata;
 }
 
 /**
@@ -173,7 +189,7 @@ export async function mintNFTAndSave(
     const imageUri = await uploadCertificateToIPFS(certSvg, `pioneer-${userId}-${Date.now()}.svg`);
 
     // Generate metadata referencing the unique certificate image
-    const metadata = generateGenesisScholarMetadata(imageUri, ensName);
+    const metadata = generateGenesisScholarMetadata(imageUri, ensName, certSvg.toString('utf-8'));
 
     // Upload metadata to IPFS
     const metadataUri = await uploadMetadataToIPFS(metadata);
@@ -245,13 +261,24 @@ export async function mintOnChain(
   // If on-chain operations are not available, fall back to mock (dev only)
   if (!isOnChainEnabled()) {
     if (process.env.NODE_ENV === "production") {
-      throw new Error("On-chain minting unavailable: AMOY_RPC_URL and DEPLOYER_PRIVATE_KEY must be set.");
+      throw new Error("On-chain minting unavailable: POLYGON_RPC_URL and DEPLOYER_PRIVATE_KEY must be set.");
     }
     logger.warn("On-chain minting disabled (missing env vars) — using dev mock", "nft-service");
     await new Promise((resolve) => setTimeout(resolve, 500));
     const mockTokenId = `mock-${Date.now()}-${Math.random().toString(36).substring(7)}`;
     // Return empty txHash so callers know this wasn't a real on-chain mint
     return { tokenId: mockTokenId, txHash: "", contractAddress };
+  }
+
+  const isPublicUri =
+    metadataUri.startsWith("ipfs://") ||
+    metadataUri.startsWith("https://") ||
+    metadataUri.startsWith("http://");
+
+  if (!isPublicUri) {
+    throw new Error(
+      `Invalid metadata URI for on-chain minting: ${metadataUri}. Use a public IPFS/HTTP URL.`
+    );
   }
 
   const publicClient = getPublicClient();
@@ -302,7 +329,7 @@ export async function mintOnChain(
     // Sign the transaction (specify chain explicitly for type safety)
     const serialized = await walletClient.signTransaction({
       ...tx,
-      chain: polygonAmoy,
+      chain: polygon,
     });
 
     // Send the raw transaction
@@ -319,18 +346,24 @@ export async function mintOnChain(
       throw new Error(`Mint transaction reverted: ${txHash}`);
     }
 
-    // Try to extract the tokenId from the Minted event log
+    // Extract tokenId from ERC-721 Transfer mint event (from zero address).
+    // Previous logic read topics[2] from any log, which could incorrectly parse an address as tokenId.
     let tokenId = `${Date.now()}`;
     try {
+      const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
       for (const log of receipt.logs) {
         try {
-          // The Minted event has indexed `to` and indexed `tokenId`
-          if (log.topics.length >= 3) {
-            // tokenId is the second indexed param (topics[2])
-            const raw = BigInt(log.topics[2]!);
-            tokenId = raw.toString();
-            break;
-          }
+          const topic0 = log.topics[0]?.toLowerCase();
+          if (topic0 !== transferTopic || log.topics.length < 4) continue;
+
+          // Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+          const from = BigInt(log.topics[1]!);
+          if (from !== 0n) continue;
+
+          const rawTokenId = BigInt(log.topics[3]!);
+          tokenId = rawTokenId.toString();
+          break;
         } catch {
           // Not our event, continue
         }
@@ -420,7 +453,7 @@ export async function mintGenesisNFTs(params: MintNFTParams) {
   const genesisImageUri = await uploadCertificateToIPFS(pioneerSvgBuffer, pioneerFilename);
 
   // Generate metadata (reference unique SVG)
-  const genesisMetadata = generateGenesisScholarMetadata(genesisImageUri, ensName);
+  const genesisMetadata = generateGenesisScholarMetadata(genesisImageUri, ensName, pioneerSvgBuffer.toString('utf-8'));
 
   const genesisMetadataUri = GENESIS_PIONEER_METADATA_URI
     ? GENESIS_PIONEER_METADATA_URI
@@ -527,10 +560,11 @@ export function generateCourseCompletionMetadata(
   courseName: string,
   courseSlug: string,
   recipientName?: string,
-  courseLevel?: string
+  courseLevel?: string,
+  svgData?: string
 ): NFTMetadata {
   const recipient = recipientName || "Scholar";
-  return {
+  const metadata: NFTMetadata = {
     name: `${courseName} — ${recipient}`,
     description: `On-chain certificate of completion for ${courseName} on EIPsInsight Academy, awarded to ${recipient}. This unique certificate is generated specifically for this recipient and is permanently recorded on the blockchain.`,
     image: imageUri,
@@ -548,6 +582,12 @@ export function generateCourseCompletionMetadata(
     ],
     external_url: `https://academy.eipsinsight.com/courses/${courseSlug}`,
   };
+
+  if (svgData) {
+    metadata.image_data = svgData;
+  }
+
+  return metadata;
 }
 
 /**
@@ -580,7 +620,7 @@ export async function mintCourseCompletionNFT(params: {
 
   // Generate metadata (now references the unique SVG image)
   const metadata = generateCourseCompletionMetadata(
-    imageUri, courseName, courseSlug, recipientName, courseLevel
+    imageUri, courseName, courseSlug, recipientName, courseLevel, certSvgBuffer.toString('utf-8')
   );
 
   // Upload metadata to IPFS
@@ -671,24 +711,33 @@ export async function syncUserNFTs(userId: string) {
     const address = wallet.address as `0x${string}`;
     
     try {
-      // Find all Minted events for this user
-      const logs = await publicClient.getLogs({
+      // Fetch total tokens minted
+      const currentTokenId = await publicClient.readContract({
         address: contractAddress,
-        event: {
-          type: "event",
-          name: "Minted",
-          inputs: [
-            { indexed: true, name: "to", type: "address" },
-            { indexed: true, name: "tokenId", type: "uint256" },
-          ],
-        },
-        args: { to: address },
-        fromBlock: BigInt(0), // Start from genesis for Amoy
-      });
+        abi: NFT_CONTRACT_ABI,
+        functionName: "getCurrentTokenId",
+      }) as bigint;
 
-      for (const log of logs) {
-        const tokenIdInt = log.args.tokenId;
-        if (tokenIdInt === undefined) continue;
+      const userTokens: bigint[] = [];
+      // This is a naive loop. For large collections, a subgraph or batched queries are better.
+      // But it avoids RPC block range limits.
+      for (let i = 0n; i < currentTokenId; i++) {
+        try {
+          const owner = await publicClient.readContract({
+            address: contractAddress,
+            abi: NFT_CONTRACT_ABI,
+            functionName: "ownerOf",
+            args: [i],
+          }) as string;
+          if (owner.toLowerCase() === address.toLowerCase()) {
+            userTokens.push(i);
+          }
+        } catch (e) {
+          // Token might not exist or burned
+        }
+      }
+
+      for (const tokenIdInt of userTokens) {
         const tokenId = tokenIdInt.toString();
 
         // Check if we already have this NFT by tokenId and contractAddress
@@ -713,7 +762,8 @@ export async function syncUserNFTs(userId: string) {
             // Fetch metadata JSON
             let metadata: NFTMetadata;
             if (tokenUri.startsWith('ipfs://')) {
-              const gatewayUrl = `https://gateway.pinata.cloud/ipfs/${tokenUri.replace('ipfs://', '')}`;
+              // Using ipfs.io as default gateway to avoid 429 errors from public pinata gateway
+              const gatewayUrl = `https://ipfs.io/ipfs/${tokenUri.replace('ipfs://', '')}`;
               const metadataRes = await fetch(gatewayUrl);
               if (!metadataRes.ok) throw new Error(`HTTP ${metadataRes.status} fetching metadata`);
               metadata = await metadataRes.json() as NFTMetadata;
@@ -743,7 +793,7 @@ export async function syncUserNFTs(userId: string) {
                 contractAddress,
                 chainId: AMOY_CHAIN_ID,
                 ownerAddress: address,
-                transactionHash: log.transactionHash,
+                transactionHash: null,
               }
             });
             syncedCount++;

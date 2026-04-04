@@ -5,7 +5,7 @@
  * (deployer/relayer signer) for all server-side on-chain interactions.
  *
  * Environment variables required:
- *   AMOY_RPC_URL          – JSON-RPC URL for Polygon Amoy testnet
+ *   POLYGON_RPC_URL       – JSON-RPC URL for Polygon mainnet
  *   DEPLOYER_PRIVATE_KEY  – hex private key of the server relayer wallet
  */
 
@@ -17,18 +17,29 @@ import {
   type WalletClient,
   type Account,
 } from "viem";
-import { polygonAmoy } from "viem/chains";
+import { polygon, mainnet } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
+import { addEnsContracts } from "@ensdomains/ensjs";
 
 // ---------------------------------------------------------------------------
 // Environment helpers
 // ---------------------------------------------------------------------------
 
 function getRpcUrl(): string {
-  const url = process.env.AMOY_RPC_URL;
+  const url = process.env.POLYGON_RPC_URL || process.env.AMOY_RPC_URL;
   if (!url) {
     throw new Error(
-      "[viem-client] AMOY_RPC_URL is not set. On-chain operations will fail."
+      "[viem-client] POLYGON_RPC_URL is not set. On-chain operations will fail."
+    );
+  }
+  return url;
+}
+
+function getEthRpcUrl(): string {
+  const url = process.env.ETHEREUM_RPC_URL;
+  if (!url) {
+    throw new Error(
+      "[viem-client] ETHEREUM_RPC_URL is not set. Mainnet ENS operations will fail."
     );
   }
   return url;
@@ -68,16 +79,18 @@ export function getDeployerAccount(): Account {
 
 let _publicClient: PublicClient | null = null;
 let _walletClient: WalletClient | null = null;
+let _ethPublicClient: PublicClient | null = null;
+let _ethWalletClient: WalletClient | null = null;
 
 /**
- * Read-only public client for Polygon Amoy.
+ * Read-only public client for Polygon mainnet.
  */
 export function getPublicClient(): PublicClient {
   if (!_publicClient) {
     _publicClient = createPublicClient({
-      chain: polygonAmoy,
+      chain: polygon,
       transport: http(getRpcUrl()),
-    });
+    }) as unknown as PublicClient;
   }
   return _publicClient;
 }
@@ -89,11 +102,38 @@ export function getWalletClient(): WalletClient {
   if (!_walletClient) {
     _walletClient = createWalletClient({
       account: getDeployerAccount(),
-      chain: polygonAmoy,
+      chain: polygon,
       transport: http(getRpcUrl()),
-    });
+    }) as unknown as WalletClient;
   }
   return _walletClient;
+}
+
+/**
+ * Read-only public client for Ethereum mainnet (for ENS).
+ */
+export function getEthPublicClient(): PublicClient {
+  if (!_ethPublicClient) {
+    _ethPublicClient = createPublicClient({
+      chain: addEnsContracts(mainnet),
+      transport: http(getEthRpcUrl()),
+    }) as unknown as PublicClient;
+  }
+  return _ethPublicClient;
+}
+
+/**
+ * Wallet (signing) client for Ethereum mainnet (for ENS).
+ */
+export function getEthWalletClient(): WalletClient {
+  if (!_ethWalletClient) {
+    _ethWalletClient = createWalletClient({
+      account: getDeployerAccount(),
+      chain: addEnsContracts(mainnet),
+      transport: http(getEthRpcUrl()),
+    }) as unknown as WalletClient;
+  }
+  return _ethWalletClient;
 }
 
 /**
@@ -107,7 +147,7 @@ export function getDeployerAddress(): `0x${string}` {
  * Check whether on-chain operations are available (env vars present and valid).
  */
 export function isOnChainEnabled(): boolean {
-  const url = process.env.AMOY_RPC_URL;
+  const url = process.env.POLYGON_RPC_URL || process.env.AMOY_RPC_URL;
   const key = process.env.DEPLOYER_PRIVATE_KEY;
   
   if (!url || !key) return false;

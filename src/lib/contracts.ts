@@ -2,13 +2,22 @@
  * Smart Contract ABIs and addresses
  *
  * Contract addresses can be overridden via environment variables:
- *   NFT_CONTRACT_ADDRESS      – deployed ERC-721 (overrides testnet default)
- *   ENS_REGISTRAR_ADDRESS     – deployed ENS registrar mock (overrides testnet default)
+ *   NFT_CONTRACT_ADDRESS      – deployed ERC-721 on Polygon mainnet
+ * 
+ * ENS Integration:
+ * - Uses the real ENS protocol on Ethereum mainnet
+ * - Subdomains of ayushetty.eth are registered via the ENS registry
+ * - No custom registrar contract needed
+ * - Requires: DEPLOYER_PRIVATE_KEY (for signing on Ethereum) and ETHEREUM_RPC_URL (optional)
  */
 
 import { logger } from "./monitoring";
 
-export const AMOY_CHAIN_ID = 80002;
+export const POLYGON_MAINNET_CHAIN_ID = 137;
+// Backward-compatible alias retained to avoid breaking older imports.
+export const AMOY_CHAIN_ID = POLYGON_MAINNET_CHAIN_ID;
+const LEGACY_AMOY_CHAIN_ID = 80002;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export const ENS_ROOT_DOMAIN = "ayushetty.eth";
 
@@ -56,7 +65,8 @@ export const NFT_CONTRACT_ABI = [
   },
 ] as const;
 
-// ENS Registrar Contract ABI
+// ENS Registrar Contract ABI (DEPRECATED - Using real ENS protocol on Ethereum)
+// Kept for backward compatibility only
 export const ENS_REGISTRAR_ABI = [
   {
     inputs: [
@@ -88,47 +98,43 @@ export const ENS_REGISTRAR_ABI = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Default deployed addresses (Polygon Amoy testnet)
+// Contract addresses
 // ---------------------------------------------------------------------------
 
-const DEFAULT_NFT_CONTRACT_AMOY = "0xd9a8c19a04bb1e578c2655b9f58d83d8a39cdb88";
-const DEFAULT_ENS_REGISTRAR_AMOY = "0xe248de43bbda470c9ca0262d09865f53270ce76d";
-
-// Contract Addresses – prefer env overrides, fallback to defaults
+// Polygon mainnet addresses must be provided explicitly through env vars.
+// We intentionally do not fall back to old Amoy deployments.
 export const CONTRACTS: Record<number, Record<string, string>> = {
-  // Polygon Amoy Testnet
-  [AMOY_CHAIN_ID]: {
-    NFT_CONTRACT: process.env.NFT_CONTRACT_ADDRESS || DEFAULT_NFT_CONTRACT_AMOY,
-    ENS_REGISTRAR: process.env.ENS_REGISTRAR_ADDRESS || DEFAULT_ENS_REGISTRAR_AMOY,
+  // Polygon Mainnet - Only NFT_CONTRACT_ADDRESS needed (ENS uses real protocol on Ethereum)
+  [POLYGON_MAINNET_CHAIN_ID]: {
+    NFT_CONTRACT: process.env.NFT_CONTRACT_ADDRESS || ZERO_ADDRESS,
   },
-  // Polygon Mainnet — not yet deployed
-  // 137: { ... },
-  // Ethereum Mainnet — not yet deployed
-  // 1: { ... },
 };
 
 export const CHAIN_CONFIG = {
-  [AMOY_CHAIN_ID]: {
-    name: "Polygon Amoy",
-    chainId: AMOY_CHAIN_ID,
-    hexChainId: "0x13882",
+  [POLYGON_MAINNET_CHAIN_ID]: {
+    name: "Polygon",
+    chainId: POLYGON_MAINNET_CHAIN_ID,
+    hexChainId: "0x89",
     rpcUrls: [
-      process.env.AMOY_RPC_URL || "https://rpc-amoy.polygon.technology",
-      "https://polygon-amoy-bor-rpc.publicnode.com",
+      process.env.POLYGON_RPC_URL || process.env.AMOY_RPC_URL || "https://polygon-rpc.com",
+      "https://polygon-bor-rpc.publicnode.com",
     ],
-    blockExplorerUrls: ["https://amoy.polygonscan.com"],
+    blockExplorerUrls: ["https://polygonscan.com"],
     nativeCurrency: {
       name: "MATIC",
       symbol: "MATIC",
       decimals: 18,
     },
   },
-  137: {
-    name: "Polygon",
-    chainId: 137,
-    hexChainId: "0x89",
-    rpcUrls: ["https://polygon-rpc.com"],
-    blockExplorerUrls: ["https://polygonscan.com"],
+  [LEGACY_AMOY_CHAIN_ID]: {
+    name: "Polygon Amoy",
+    chainId: LEGACY_AMOY_CHAIN_ID,
+    hexChainId: "0x13882",
+    rpcUrls: [
+      process.env.AMOY_RPC_URL || "https://rpc-amoy.polygon.technology",
+      "https://polygon-amoy-bor-rpc.publicnode.com",
+    ],
+    blockExplorerUrls: ["https://amoy.polygonscan.com"],
     nativeCurrency: {
       name: "MATIC",
       symbol: "MATIC",
@@ -195,15 +201,13 @@ export function getExplorerAddressUrl(chainId: number, address: string): string 
 // Production safety: warn about placeholder addresses
 // ---------------------------------------------------------------------------
 if (process.env.NODE_ENV === "production") {
-  const amoy = CONTRACTS[AMOY_CHAIN_ID];
-  if (amoy) {
-    for (const [name, addr] of Object.entries(amoy)) {
-      if (addr === "0x0000000000000000000000000000000000000000") {
-        logger.warn(
-          `${name} on Amoy uses placeholder address 0x000...000. Set NFT_CONTRACT_ADDRESS / ENS_REGISTRAR_ADDRESS env vars.`,
-          "contracts"
-        );
-      }
+  const polygonContracts = CONTRACTS[POLYGON_MAINNET_CHAIN_ID];
+  if (polygonContracts) {
+    if ((polygonContracts.NFT_CONTRACT || ZERO_ADDRESS) === ZERO_ADDRESS) {
+      logger.warn(
+        `NFT_CONTRACT_ADDRESS on Polygon mainnet uses placeholder address 0x000...000. Set NFT_CONTRACT_ADDRESS env var.`,
+        "contracts"
+      );
     }
   }
 }
